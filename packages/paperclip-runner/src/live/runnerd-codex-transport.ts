@@ -1255,6 +1255,7 @@ export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionD
   cursorCloudProxyPath?: string;
   cursorCloudProxySha256?: string;
   recoveryPurpose?: "execution" | "stop_cleanup" | "source_reconcile";
+  sourceReconciliationLaunch?: { requirements: RunnerProviderLaunchRequirements };
   opencodePermissionMode?: NativeOpenCodePermissionMode;
   acpxAgent?: QualifiedAcpxAgent;
   /** Explicit evaluation-only candidate selection, never derived from persisted session input. */
@@ -3676,8 +3677,16 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
 
   constructor(readonly options: CapabilityRunnerdCodexTransportOptions) {
     this.#sourceReconciliationPending = options.recoveryPurpose === "source_reconcile";
+    const sourceRequirements = options.sourceReconciliationLaunch?.requirements;
+    if (options.sourceReconciliationLaunch && (!this.#sourceReconciliationPending || !options.prepareLaunch
+      || sourceRequirements?.schema !== "paperclip.runner.launch-requirements.v1"
+      || sourceRequirements.provider !== "codex" || !options.prpIdentity
+      || commandDigest(sourceRequirements.identity) !== commandDigest(options.prpIdentity))) {
+      throw new Error("native_runner_source_launch_requirements_invalid");
+    }
     if (this.#sourceReconciliationPending) {
-      if ((options.provider ?? "codex") !== "codex" || !options.resumeProviderSession?.driverSessionId || !options.prpIdentity || options.adoptExistingRunner) {
+      if ((options.provider ?? "codex") !== "codex" || !options.resumeProviderSession?.driverSessionId || !options.prpIdentity
+        || (options.adoptExistingRunner && !options.sourceReconciliationLaunch)) {
         throw new Error("native_runner_source_reconciliation_requires_retained_source");
       }
       if (options.sourceRecoveryVersion !== 1) {
@@ -5073,8 +5082,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#recordPreparedWorkingDirectory(prepared);
     this.#assertStartupOpen();
     template.provider = prepared.provider;
-    new RunnerLaunchPreparationStore(this.#root).save(requirements, prepared, this.#core!.store.state.identity);
-    this.#core!.persistPreparedLaunchConfiguration(identity, prepared.configurationId);
+    const sourceLaunch = this.#sourceReconciliationPending && this.options.sourceReconciliationLaunch
+      && recoveryIdentityMatches(identity, this.options.sourceReconciliationLaunch.requirements.identity);
+    if (!sourceLaunch) {
+      new RunnerLaunchPreparationStore(this.#root).save(requirements, prepared, this.#core!.store.state.identity);
+      this.#core!.persistPreparedLaunchConfiguration(identity, prepared.configurationId);
+    }
     return prepared;
   }
 
@@ -5915,7 +5928,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     // Reusing resources still requires current environment authorization. The
     // optional hook avoids re-preparation after controller storage is lost.
     // Existing consumers retain the preparation callback's authorization path.
-    const authorizeAdoption = this.options.adoptExistingRunner && this.options.authorizeRunnerAdoption;
+    const authorizeAdoption = !this.options.sourceReconciliationLaunch
+      && this.options.adoptExistingRunner && this.options.authorizeRunnerAdoption;
     if (this.options.prepareLaunch && authorizeAdoption) {
       const configurationId = core.preparedLaunchConfigurationId(desiredIdentity);
       if (!configurationId) throw new Error("runner_launch_recovery_configuration_unavailable");
@@ -5924,7 +5938,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       this.#recordPreparedWorkingDirectory({ provider: record(record(controlPlaneState!.runAttachTemplate).provider) });
     }
     let environmentPrepared: PreparedRunnerProviderLaunch | undefined;
-    if (this.options.prepareLaunch && !authorizeAdoption) {
+    if (this.options.sourceReconciliationLaunch) {
+      const requirements = this.options.sourceReconciliationLaunch.requirements;
+      const template = rotatedRunAttachPayload(controlPlaneState!, desiredIdentity, this.#authorizedTools,
+        this.options.resumeCompletionContract);
+      environmentPrepared = await this.#prepareOwnedProvider(template, desiredIdentity,
+        requirements.runtimeContext, requirements.instructions, undefined, requirements);
+      this.#runAttachTemplate = structuredClone(template);
+    } else if (this.options.prepareLaunch && !authorizeAdoption) {
       const preparations = new RunnerLaunchPreparationStore(this.#root);
       const saved = preparations.load(desiredIdentity);
       const previous = preparations.load(controlPlaneIdentity(controlPlaneState!));

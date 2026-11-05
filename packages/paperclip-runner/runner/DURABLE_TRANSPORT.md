@@ -82,6 +82,16 @@ confirms target authentication and persists its checkpoint before enabling tool
 dispatch and new turns. This protocol does not establish vendor rollout fsync
 or host-level physical process retirement by itself.
 
+If controller-local launch preparation is absent, the trusted caller can supply
+`sourceReconciliationLaunch: { requirements }` with the frozen source inputs.
+The current execution owner prepares this launch afresh. The source launch does
+not overwrite the ordinary source configuration or populate its preparation
+cache. This option requires source mode, exact source identity and a preparer.
+The process owner can also adopt its exact existing source-mode incarnation
+with this option. It must verify that incarnation before adoption. A fresh
+preparation authorizes the source incarnation instead of its older ordinary
+configuration; it does not spawn another process or release the source gate.
+
 Durable mode is selected only when `paperclip-runnerd` receives
 `--connect-url`. Its executor accepts a Codex app-server descriptor and bound
 completion contract through `run.prepare`, owns the provider process group,
@@ -98,7 +108,8 @@ for the existing process that completed the current turn. An eligibility check
 never selects or restores a provider and cannot release source reconciliation.
 Active turns, goals, startup attempts, tool calls, pending credentials, and
 unsettled events block parking. The bounded completed-turn tail drain retains
-late accounting for normal delivery. The check also inspects the live provider
+late accounting and goal changes for durable state and normal event delivery.
+The check also inspects the live provider
 after that drain, so a late active-goal notification cannot be hidden by the
 older executor journal. This hook does not detach a controller, stop a process,
 or advertise hosted parking support. The host-control consumer must separately
