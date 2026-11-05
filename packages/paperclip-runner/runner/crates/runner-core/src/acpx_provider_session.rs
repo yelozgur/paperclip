@@ -358,12 +358,18 @@ pub(crate) fn goal_is_dormant(projection: &Value) -> bool {
         && projection["workingNow"].as_bool() == Some(false)
         && projection
             .pointer("/goal/workingNow")
-            .and_then(Value::as_bool)
-            != Some(true)
+            .is_none_or(|working| working.as_bool() == Some(false))
         && (projection.get("goal") == Some(&Value::Null)
             || matches!(
                 projection.pointer("/goal/status").and_then(Value::as_str),
-                Some("paused" | "blocked" | "complete")
+                Some(
+                    "paused"
+                        | "blocked"
+                        | "limited"
+                        | "usage_limited"
+                        | "budget_limited"
+                        | "complete"
+                )
             ))
 }
 
@@ -1767,6 +1773,54 @@ fn with_cleanup_error(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dormant_goals_accept_known_inactive_statuses_and_reject_active_or_unknown() {
+        use super::*;
+        for (status, expected) in [
+            ("paused", true),
+            ("blocked", true),
+            ("limited", true),
+            ("usage_limited", true),
+            ("budget_limited", true),
+            ("complete", true),
+            ("active", false),
+            ("unknown", false),
+        ] {
+            let mut projection = json!({
+                "schema":"paperclip.session_goal.snapshot.v1", "workingNow":false,
+                "goal":{"status":status,"workingNow":false}
+            });
+            assert_eq!(goal_is_dormant(&projection), expected, "{status}");
+            projection["goal"]
+                .as_object_mut()
+                .unwrap()
+                .remove("workingNow");
+            assert_eq!(
+                goal_is_dormant(&projection),
+                expected,
+                "missing workingNow: {status}"
+            );
+            for working in [
+                json!(true),
+                Value::Null,
+                json!("false"),
+                json!("true"),
+                json!(0),
+                json!({}),
+                json!([]),
+            ] {
+                projection["goal"]["workingNow"] = working;
+                assert!(
+                    !goal_is_dormant(&projection),
+                    "{status} has invalid workingNow"
+                );
+            }
+            projection["goal"]["workingNow"] = json!(false);
+            projection["workingNow"] = json!(true);
+            assert!(!goal_is_dormant(&projection), "{status} session is working");
+        }
+    }
+
     #[test]
     fn startup_cleanup_failure_keeps_the_validated_provider_cause() {
         use super::*;

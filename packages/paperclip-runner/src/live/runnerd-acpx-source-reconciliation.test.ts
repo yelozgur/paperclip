@@ -239,6 +239,22 @@ it.skipIf(process.platform === "win32").each(["goal", "active", "tool"] as const
   } finally { await f.cleanup(); }
 }, 30_000);
 
+it.skipIf(process.platform === "win32").each(["limited", "usage_limited", "budget_limited"] as const)("rejects a saved %s ACPX goal that resumes active and reaps the sidecar", async status => {
+  const f = await fixture("claude");
+  try {
+    const state = await read(f.providerFile);
+    state.goalProjection = { schema: "paperclip.session_goal.snapshot.v1", goal: { objective: "Settled limited goal", status, workingNow: false }, workingNow: false };
+    await writeFile(f.providerFile, JSON.stringify(state)); await writeFile(f.fault, "goal");
+    await expect(f.recover().transport.request("thread/read", {})).rejects.toThrow("saved dormant ACPX resumed an active or unknown goal");
+    await vi.waitFor(async () => {
+      const calls = await f.calls();
+      expect(absent(calls.filter(entry => entry.processStart).at(-1)!.processStart)).toBe(true);
+      for (const entry of calls) if (entry.processStart || entry.childPid) expect(stopped(entry.processStart ?? entry.childPid)).toBe(true);
+    }, { timeout: 5_000 });
+    expect(await f.count("processStart")).toBe(2); expect(await f.count("turn.start")).toBe(1);
+  } finally { await f.cleanup(); }
+}, 30_000);
+
 it.skipIf(process.platform === "win32")("preserves ordinary same-run active goal restoration", async () => {
   const f = await fixture();
   try {
