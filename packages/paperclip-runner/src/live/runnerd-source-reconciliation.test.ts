@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { DurablePrpControlPlane } from "../control-plane/durable-prp-control-plane.js";
 import { expect, it, vi } from "vitest";
 import { createCapabilityRunnerdCodexTransport, type CapabilityRunnerdCodexTransportOptions } from "./runnerd-codex-transport.js";
-import { runnerLaunchRequirementsDigest, runnerProviderLaunchRequirements, type RunnerProviderLaunchRequirements } from "./runner-provider-launch.js";
+import { createRunnerProviderLaunch, runnerLaunchRequirementsDigest, runnerProviderLaunchRequirements, type RunnerProviderLaunchRequirements } from "./runner-provider-launch.js";
 import { defaultCapabilityRunnerdBinary, fakeCodex, fakeCodexArgs } from "../../test/support/runnerd-transport.js";
 import { createNativeSessionBackend } from "../backends/native-backend-factory.js";
 import type { NativeExecutionInput } from "../contracts/native-execution.js";
@@ -114,9 +114,16 @@ it("recovers the real native backend before attaching the next run", async () =>
     await recovered.session!.attachRun!({ identity: { ...f.nativeIdentity, runId: "run-target" } });
     expect(source.evidence().runnerPid).toBe(before.runnerPid);
     await recovered.session!.startTurn({ message: { role: "user", text: "Continue under the next run." } });
-    for await (const event of recovered.session!.events()) if (event.eventType === "turn.completed") break;
+    let completed = false;
+    for await (const event of recovered.session!.events()) {
+      if (event.eventType === "turn.completed" && event.runId === "run-target") { completed = true; break; }
+    }
+    expect(completed).toBe(true);
     await f.settled();
-    expect((await recovered.session!.snapshot()).sessionId).toBe(f.thread.id);
+    const snapshot = await recovered.session!.snapshot();
+    expect(snapshot.sessionId).toBe(f.thread.id);
+    expect(snapshot.terminal).toMatchObject({ runTerminalState: "succeeded" });
+    expect(snapshot.semanticResult?.reportedWorkDisposition).toBe("done");
     expect(await f.calls("turn/start")).toBe(2); expect(await f.calls("process-start")).toBe(2);
     expect(await f.calls("thread/resume")).toBe(1);
     await recovered.session!.close({ reason: "test complete" });
@@ -167,7 +174,9 @@ it.each(["launch", "adopt", "adopt-denied"] as const)("prepares a cacheless sour
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("missing source listener");
-  const registration: NonNullable<CapabilityRunnerdCodexTransportOptions["controlPlaneRegistration"]> = async next => {
+  const registeredIdentities: unknown[] = [];
+  const registration: NonNullable<CapabilityRunnerdCodexTransportOptions["controlPlaneRegistration"]> = async (next, identity) => {
+    registeredIdentities.push(identity);
     authority = next;
     return { connectUrl: `ws://127.0.0.1:${address.port}/runner`, release: () => { if (authority === next) authority = null; } };
   };
@@ -182,8 +191,11 @@ it.each(["launch", "adopt", "adopt-denied"] as const)("prepares a cacheless sour
       permissions: provider.readOnly ? "paperclip-runner-workspace-read-only" : "paperclip-runner-workspace-only",
       conversationMode: provider.conversationMode,
       config: { include_collaboration_mode_instructions: provider.includeCollaborationModeInstructions !== false },
-    }, null, provider.instructions ?? "");
-    const prepare = vi.fn(async (input: RunnerProviderLaunchRequirements) => ({ configurationId: input.identity.runId === fixture.identity.runId ? "new-source-incarnation" : "target-configuration", requirementsDigest: runnerLaunchRequirementsDigest(input), provider }));
+    }, null, "You are a Paperclip agent.");
+    const prepare = vi.fn(async (input: RunnerProviderLaunchRequirements) => ({ configurationId: input.identity.runId === fixture.identity.runId ? "new-source-incarnation" : "target-configuration", requirementsDigest: runnerLaunchRequirementsDigest(input),
+      provider: createRunnerProviderLaunch(input, { options: fixture.options, root: fixture.root, cwd: provider.cwd,
+        codexHome: join(fixture.root, "codex-home"), codexCommand: fakeCodex, providerNodeCommand: "", opencodeProxyPath: "", acpxSidecarPath: "" }) }));
+    expect((await prepare(requirements)).provider).toEqual(provider); prepare.mockClear();
     const binary = fixture.options.runnerBinary;
     const sourceOptions: Partial<CapabilityRunnerdCodexTransportOptions> = { sourceRecoveryVersion: 1,
       sourceReconciliationLaunch: { requirements }, prepareLaunch: prepare,
@@ -201,6 +213,7 @@ it.each(["launch", "adopt", "adopt-denied"] as const)("prepares a cacheless sour
     let resumed = fixture.recover(sourceOptions);
     expect((await resumed.transport.request("thread/read", {})).thread).toMatchObject(fixture.thread);
     expect(prepare).toHaveBeenCalledExactlyOnceWith(requirements, undefined);
+    expect(registeredIdentities.at(-1)).toEqual(fixture.identity);
     expect((await read(fixture.coreFile)).preparedLaunchConfigurations).toEqual(before.preparedLaunchConfigurations);
     await expect(readFile(join(fixture.root, "launch-preparation.json"))).rejects.toHaveProperty("code", "ENOENT");
     if (mode !== "launch") {
@@ -224,6 +237,7 @@ it.each(["launch", "adopt", "adopt-denied"] as const)("prepares a cacheless sour
       }
       expect((await resumed.transport.request("thread/read", {})).thread).toMatchObject(fixture.thread);
       expect(resumed.evidence().runnerPid).toBe(evidence.runnerPid);
+      expect(registeredIdentities.at(-1)).toEqual(fixture.identity);
       expect(prepare).toHaveBeenCalledExactlyOnceWith(requirements, undefined);
       expect(authorizeOldConfiguration).not.toHaveBeenCalled(); expect(launch).not.toHaveBeenCalled();
       expect((await read(fixture.coreFile)).preparedLaunchConfigurations).toEqual(before.preparedLaunchConfigurations);
@@ -231,6 +245,7 @@ it.each(["launch", "adopt", "adopt-denied"] as const)("prepares a cacheless sour
     }
     const target = { ...fixture.identity, runId: "prepared-target", turnId: "prepared-turn", itemId: "prepared-item" };
     await resumed.transport.attachRun!(target);
+    expect(prepare.mock.calls.at(-1)?.[0].instructions).toBe(requirements.instructions);
     expect((await read(fixture.coreFile)).preparedLaunchConfigurations).toContainEqual({ identity: target, configurationId: "target-configuration" });
     expect((await read(join(fixture.root, "launch-preparation.json"))).entries).toContainEqual(expect.objectContaining({ prepared: expect.objectContaining({ configurationId: "target-configuration" }) }));
     await fixture.complete(resumed, "Continue after source preparation."); await fixture.settled();
