@@ -1112,6 +1112,7 @@ impl AcpxCommandExecutor {
         ) || (self.recovery_pending_effects.is_some()
             && !self.restore_checked
             && state.identity.is_some()
+            && !state.provider_exit_unconfirmed
             && self.candidate_admission().is_none()
             && acpx_release_profile(&state.descriptor.agent)
                 .is_some_and(|profile| !profile.qualification_pending)
@@ -4998,6 +4999,9 @@ mod tests {
         let config = test_config(&directory, Some(launch_profile));
         let mut executor = AcpxCommandExecutor::with_runner_config(&directory, &config);
         executor.state = Some(state);
+        executor.recovery_pending_effects = Some(0);
+        executor.restore_session_if_needed().unwrap();
+        assert!(executor.session.is_none());
         let open_error = executor.open_session().unwrap_err();
         assert!(open_error
             .to_string()
