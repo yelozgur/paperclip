@@ -287,9 +287,7 @@ impl CommandExecutor for NativeProviderCommandExecutor {
         }
         self.select_recovery()?;
         match self.selected.as_mut() {
-            Some(SelectedExecutor::LocalFacade(executor)) => {
-                executor.observe_recovery_state(state)?
-            }
+            Some(SelectedExecutor::LocalFacade(executor)) => executor.observe_recovery_state(state),
             Some(SelectedExecutor::Acpx(executor)) => executor.observe_recovery_state(state),
             _ => {}
         }
