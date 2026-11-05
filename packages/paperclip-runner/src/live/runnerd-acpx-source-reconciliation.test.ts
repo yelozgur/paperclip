@@ -179,11 +179,10 @@ it.skipIf(process.platform === "win32")("recovers and adopts ACPX through the re
   } finally { await f.cleanup(); }
 }, 30_000);
 
-it.skipIf(process.platform === "win32").each(["codex", "claude", "prepared", "adopt", "paused", "retained"] as const)("recovers qualified ACPX %s under source authority before the second turn", async mode => {
+it.skipIf(process.platform === "win32").each(["codex", "claude", "adopt", "paused", "retained"] as const)("recovers qualified ACPX %s under source authority before the second turn", async mode => {
   const f = await fixture(mode === "claude" ? "claude" : "codex");
   try {
     await expect(f.recover({ acpxSourceRecoveryVersion: undefined }).transport.request("thread/read", {})).rejects.toThrow("recovery_integrity_unsupported");
-    if (mode === "prepared") { const state = await read(f.providerFile); state.lifecycle = "prepared"; await writeFile(f.providerFile, JSON.stringify(state)); }
     if (mode === "paused") await writeFile(f.fault, "paused");
     if (mode === "retained") {
       const state = await read(f.providerFile);

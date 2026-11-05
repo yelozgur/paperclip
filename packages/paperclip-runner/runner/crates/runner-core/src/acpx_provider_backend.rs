@@ -1106,18 +1106,10 @@ impl AcpxCommandExecutor {
         if state.descriptor.run_id != self.context.run_id {
             return Ok(());
         }
-        if !(matches!(
+        if !matches!(
             state.lifecycle.as_str(),
             "session_open" | "turn_starting" | "turn_active" | "suspended"
-        ) || (self.recovery_pending_effects.is_some()
-            && !self.restore_checked
-            && state.identity.is_some()
-            && !state.provider_exit_unconfirmed
-            && self.candidate_admission().is_none()
-            && acpx_release_profile(&state.descriptor.agent)
-                .is_some_and(|profile| !profile.qualification_pending)
-            && state.lifecycle == "prepared"))
-        {
+        ) {
             return Ok(());
         }
         let unsafe_active = matches!(state.lifecycle.as_str(), "turn_starting" | "turn_active");
@@ -1205,10 +1197,7 @@ impl AcpxCommandExecutor {
             && self.candidate_admission().is_none()
             && acpx_release_profile(&state.descriptor.agent)
                 .is_some_and(|profile| !profile.qualification_pending)
-            && matches!(
-                state.lifecycle.as_str(),
-                "prepared" | "session_open" | "suspended"
-            )
+            && matches!(state.lifecycle.as_str(), "session_open" | "suspended")
             && state.active_turn_id.is_none()
             && !state.provider_exit_unconfirmed
             && state.pending_runtime_requests.is_empty()

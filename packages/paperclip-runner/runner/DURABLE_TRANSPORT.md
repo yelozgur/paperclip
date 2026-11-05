@@ -97,7 +97,8 @@ process retirement; paired provider qualification remains necessary.
 Qualified ACPX providers advertise the separate `acpxRecoveryIntegrityVersion: 1`
 attestation. They use the same ordinary recovery observation and owner admission.
 Live checks compare the restored session identity, requests, turn and goal with
-saved dormant state. Descriptor run identity binds retained prepared ACPX files;
-a new run still requires attachment before it restores the prior session.
+saved dormant state. New predecessor admission excludes prepared provider state;
+ordinary prepared cleanup and the existing suspended-session recovery remain
+unchanged.
 The selected host driver must separately attest `acpxSourceRecoveryVersion: 1`;
 the Codex capability cannot authorize an ACPX predecessor.
