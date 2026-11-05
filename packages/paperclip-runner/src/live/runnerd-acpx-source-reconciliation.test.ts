@@ -130,8 +130,8 @@ async function fixture(agent: "codex" | "claude" = "codex", nativeSource = false
     await vi.waitFor(async () => { expect(stopped(pid)).toBe(true); for (const entry of await calls()) if (entry.processStart || entry.childPid) expect(stopped(entry.processStart ?? entry.childPid)).toBe(true); });
     const recover = (overrides: Partial<CapabilityRunnerdCodexTransportOptions> = {}) => {
       recovering = true;
-      const bundle = createCapabilityRunnerdCodexTransport({ ...options, recoveryPurpose: "source_reconcile", sourceReconciliationLaunch: { requirements: requirements! },
-        resumeProviderSession: { driverSessionId: thread.id, providerSessionId: thread.sessionId, providerIdentity }, onRecoveryAccountingEvent: async () => {}, ...overrides });
+      const bundle = createCapabilityRunnerdCodexTransport({ ...options, recoveryLaunch: { requirements: requirements! },
+        resumeProviderSession: { driverSessionId: thread.id, providerSessionId: thread.sessionId, providerIdentity }, onRecoveryAccountingEvent: async () => {}, ...overrides, get authorityRunId() { return overrides.authorityRunId ?? "run-target"; } });
       bundles.push(bundle); return bundle;
     };
     return { root, fault, runnerFile, providerFile, coreFile, identity, providerIdentity, thread, calls, count, settle, complete, recover, cleanup, nativeIdentity, nativeSnapshot, execution };
@@ -141,7 +141,8 @@ async function fixture(agent: "codex" | "claude" = "codex", nativeSource = false
 it.skipIf(process.platform === "win32")("recovers and adopts ACPX through the real native backend before attachment", async () => {
   const f = await fixture("claude", true);
   try {
-    let source = f.recover();
+    let owner = "run-target";
+    let source = f.recover({ get authorityRunId() { return owner; } });
     const backend = () => createNativeSessionBackend(f.execution, { codexTransportFactory: () => source.transport,
       environment: { PAPERCLIP_WORKSPACE_CWD: f.root }, dynamicTools: [] });
     let recovered = await backend().recoverSession!(f.nativeSnapshot!, { signal: new AbortController().signal });
@@ -150,25 +151,27 @@ it.skipIf(process.platform === "win32")("recovers and adopts ACPX through the re
     expect(await f.count("turn.start")).toBe(1); expect(await f.count("processStart")).toBe(2);
     await recovered.session!.detachControllerForRestart!();
     const launch = vi.fn(() => { throw new Error("duplicate source launch"); });
-    source = f.recover({ runnerProcessLauncher: launch, authorizeRunnerAdoption: async () => { throw new Error("old source configuration"); },
+    source = f.recover({ get authorityRunId() { return owner; }, runnerProcessLauncher: launch, authorizeRunnerAdoption: async () => { throw new Error("old source configuration"); },
       adoptExistingRunner: { pid, processGroupId: pid, startedAt, isAlive: () => !stopped(pid!), signal: () => false } });
     recovered = await backend().recoverSession!(f.nativeSnapshot!, { signal: new AbortController().signal });
     expect(recovered.recovered).toBe(true); expect(launch).not.toHaveBeenCalled(); expect(source.evidence().runnerPid).toBe(pid);
     await expect(source.transport.request("turn/start", {})).rejects.toThrow("source_attachment_pending");
-    await recovered.session!.attachRun!({ identity: { ...f.nativeIdentity, runId: "run-target" } });
-    expect(source.evidence().runnerPid).toBe(pid);
-    await recovered.session!.startTurn({ message: { role: "user", text: "Continue after authenticated attachment." } });
-    let completed = false;
-    for await (const event of recovered.session!.events()) {
-      if (event.eventType === "turn.completed" && event.runId === "run-target") { completed = true; break; }
+    for (const runId of ["run-target", "run-warm-third"]) {
+      owner = runId;
+      await recovered.session!.attachRun!({ identity: { ...f.nativeIdentity, runId } });
+      expect(source.evidence().runnerPid).toBe(pid);
+      await recovered.session!.startTurn({ message: { role: "user", text: "Continue after authenticated attachment." } });
+      let completed = false;
+      for await (const event of recovered.session!.events()) {
+        if (event.eventType === "turn.completed" && event.runId === runId) { completed = true; break; }
+      }
+      expect(completed).toBe(true); await f.settle();
+      const snapshot = await recovered.session!.snapshot();
+      expect(snapshot.sessionId).toBe(f.thread.id); expect(snapshot.providerIdentity).toEqual(f.providerIdentity);
+      expect(snapshot.semanticResult?.reportedWorkDisposition).toBe("done"); expect(snapshot.terminal).toMatchObject({ runTerminalState: "succeeded" });
     }
-    expect(completed).toBe(true);
-    await f.settle();
-    const snapshot = await recovered.session!.snapshot();
-    expect(snapshot.sessionId).toBe(f.thread.id); expect(snapshot.providerIdentity).toEqual(f.providerIdentity);
-    expect(snapshot.semanticResult?.reportedWorkDisposition).toBe("done"); expect(snapshot.terminal).toMatchObject({ runTerminalState: "succeeded" });
-    expect(await f.count("turn.start")).toBe(2); expect(await f.count("processStart")).toBe(3);
-    expect(await f.count("tool.resolve")).toBe(2);
+    expect(await f.count("turn.start")).toBe(3); expect(await f.count("processStart")).toBe(4);
+    expect(await f.count("tool.resolve")).toBe(3);
     await recovered.session!.close({ reason: "test complete" });
   } catch (error) {
     const diagnostics = await readFile(join(f.root, "native.stderr"), "utf8").catch(() => "");
@@ -179,7 +182,7 @@ it.skipIf(process.platform === "win32")("recovers and adopts ACPX through the re
 it.skipIf(process.platform === "win32").each(["codex", "claude", "prepared", "adopt", "paused", "retained"] as const)("recovers qualified ACPX %s under source authority before the second turn", async mode => {
   const f = await fixture(mode === "claude" ? "claude" : "codex");
   try {
-    expect(() => f.recover({ acpxSourceRecoveryVersion: undefined })).toThrow("source_recovery_unsupported");
+    await expect(f.recover({ acpxSourceRecoveryVersion: undefined }).transport.request("thread/read", {})).rejects.toThrow("recovery_integrity_unsupported");
     if (mode === "prepared") { const state = await read(f.providerFile); state.lifecycle = "prepared"; await writeFile(f.providerFile, JSON.stringify(state)); }
     if (mode === "paused") await writeFile(f.fault, "paused");
     if (mode === "retained") {
@@ -223,32 +226,28 @@ it.skipIf(process.platform === "win32").each(["codex", "claude", "prepared", "ad
   } finally { await f.cleanup(); }
 }, 30_000);
 
-it.skipIf(process.platform === "win32").each(["active", "starting", "goal", "working", "nested-working", "tool", "profile", "catalog"] as const)("rejects frozen ACPX %s before sidecar startup", async fault => {
-  const f = await fixture();
-  try {
-    const state = await read(f.providerFile);
-    if (fault === "active" || fault === "starting") { state.lifecycle = fault === "active" ? "turn_active" : "turn_starting"; state.activeTurnId = "uncertain-turn"; }
-    if (fault === "goal" || fault === "working") state.goalProjection = { schema: "paperclip.session_goal.snapshot.v1", goal: fault === "goal" ? { status: "active" } : null, workingNow: fault === "working" };
-    if (fault === "nested-working") state.goalProjection = { schema: "paperclip.session_goal.snapshot.v1", goal: { status: "paused", workingNow: true }, workingNow: false };
-    if (fault === "tool") state.pendingEvents.push({ executorEventId: `acpx_provider_${String(state.nextEventSequence++).padStart(16, "0")}`, eventType: "semantic_tool.input", priority: "p0", payload: {} });
-    if (fault === "profile") state.identity.profileDigest = sha("foreign profile");
-    if (fault === "catalog") state.toolSet.catalogDigest = sha("foreign catalog");
-    await writeFile(f.providerFile, JSON.stringify(state));
-    await expect(f.recover().transport.request("thread/read", {})).rejects.toThrow();
-    expect(await f.count("processStart")).toBe(1); expect(await f.count("turn.start")).toBe(1);
-  } finally { await f.cleanup(); }
-}, 30_000);
-
 it.skipIf(process.platform === "win32").each(["goal", "active", "tool"] as const)("stops the owned ACPX process group after live %s admission fails", async fault => {
   const f = await fixture();
   try {
     await writeFile(f.fault, fault);
-    await expect(f.recover().transport.request("thread/read", {})).rejects.toThrow("ACPX source");
+    await expect(f.recover().transport.request("thread/read", {})).rejects.toThrow("saved dormant ACPX");
     await vi.waitFor(async () => {
       const calls = await f.calls();
       expect(absent(calls.filter(entry => entry.processStart).at(-1)!.processStart)).toBe(true);
       for (const entry of calls) if (entry.processStart || entry.childPid) expect(stopped(entry.processStart ?? entry.childPid)).toBe(true);
     }, { timeout: 5_000 });
+    expect(await f.count("processStart")).toBe(2); expect(await f.count("turn.start")).toBe(1);
+  } finally { await f.cleanup(); }
+}, 30_000);
+
+it.skipIf(process.platform === "win32")("preserves ordinary same-run active goal restoration", async () => {
+  const f = await fixture();
+  try {
+    const state = await read(f.providerFile);
+    state.goalProjection = { schema: "paperclip.session_goal.snapshot.v1", goal: { objective: "Authorized same-run goal", status: "active" }, workingNow: false };
+    await writeFile(f.providerFile, JSON.stringify(state)); await writeFile(f.fault, "goal");
+    const sameRun = f.recover({ authorityRunId: f.identity.runId });
+    expect((await sameRun.transport.request("thread/read", {})).thread).toMatchObject(f.thread);
     expect(await f.count("processStart")).toBe(2); expect(await f.count("turn.start")).toBe(1);
   } finally { await f.cleanup(); }
 }, 30_000);

@@ -353,7 +353,7 @@ pub struct AcpxProviderSession {
     runtime_retired: bool,
 }
 
-pub(crate) fn source_goal_is_dormant(projection: &Value) -> bool {
+pub(crate) fn goal_is_dormant(projection: &Value) -> bool {
     projection["schema"] == "paperclip.session_goal.snapshot.v1"
         && projection["workingNow"].as_bool() == Some(false)
         && projection
@@ -427,13 +427,13 @@ impl AcpxProviderSession {
     pub(crate) fn verify_dormant_session(&mut self) -> Result<(), LocalRunnerError> {
         if self.state.active_turn_id().is_some() || self.state.has_pending_requests() {
             return Err(LocalRunnerError::invalid(
-                "ACPX source resumed pending work",
+                "saved dormant ACPX resumed pending work",
             ));
         }
         let goal = self.goal_control(GeneratedAcpxSidecarCommand::SessionGoalGet, json!({}))?;
-        if !source_goal_is_dormant(&goal) {
+        if !goal_is_dormant(&goal) {
             return Err(LocalRunnerError::invalid(
-                "ACPX source resumed an active or unknown goal",
+                "saved dormant ACPX resumed an active or unknown goal",
             ));
         }
         let snapshot = self
@@ -441,7 +441,7 @@ impl AcpxProviderSession {
             .request(GeneratedAcpxSidecarCommand::SessionSnapshot, json!({}))?;
         let identity: AcpxProviderSessionIdentity =
             serde_json::from_value(snapshot["identity"].clone()).map_err(|_| {
-                LocalRunnerError::invalid("ACPX source snapshot identity is invalid")
+                LocalRunnerError::invalid("saved dormant ACPX snapshot identity is invalid")
             })?;
         if identity != self.identity
             || snapshot["runId"].as_str() != Some(self.config.run_id.as_str())
@@ -453,7 +453,7 @@ impl AcpxProviderSession {
                 .is_some_and(Vec::is_empty)
         {
             return Err(LocalRunnerError::invalid(
-                "ACPX source snapshot has unexpected work or identity",
+                "saved dormant ACPX snapshot has unexpected work or identity",
             ));
         }
         Ok(())
