@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::acpx_provider_capabilities::{run_attachment_policy, RunAttachmentPolicy};
 use crate::acpx_provider_session::{
-    AcpxPermissionMode, AcpxProviderRuntimePolicy, AcpxProviderSession, AcpxProviderSessionConfig,
-    AcpxProviderSessionIdentity, AcpxTurnControlCapabilities, PiThinkingLevel,
+    source_goal_is_dormant, AcpxPermissionMode, AcpxProviderRuntimePolicy, AcpxProviderSession,
+    AcpxProviderSessionConfig, AcpxProviderSessionIdentity, AcpxTurnControlCapabilities,
+    PiThinkingLevel,
 };
 use crate::acpx_sidecar_transport::AcpxSidecarTransportConfig;
 #[cfg(test)]
@@ -885,6 +886,7 @@ pub struct AcpxCommandExecutor {
     #[cfg(test)]
     fail_after_state_rename: bool,
     launch_profile: Option<AcpxLaunchProfile>,
+    source_reconciliation: bool,
 }
 
 // The durable command's turn and the live provider callback have separate IDs.
@@ -923,6 +925,7 @@ impl AcpxCommandExecutor {
             state: None,
             session: None,
             restore_checked: false,
+            source_reconciliation: false,
             restore_error: None,
             persistence_error: None,
             #[cfg(test)]
@@ -933,6 +936,59 @@ impl AcpxCommandExecutor {
 
     pub fn state_path(&self) -> PathBuf {
         self.state_dir.join(ACPX_PROVIDER_STATE_FILE)
+    }
+
+    pub(crate) fn admit_source_reconciliation(&mut self) -> Result<(), DurableRunnerError> {
+        self.load_state_without_session(false)?;
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| DurableRunnerError::invalid("ACPX source state is missing"))?;
+        if self.candidate_admission().is_some()
+            || acpx_release_profile(&state.descriptor.agent)
+                .is_none_or(|profile| profile.qualification_pending)
+            || state.descriptor.run_id != self.context.run_id
+            || !matches!(
+                state.lifecycle.as_str(),
+                "prepared" | "session_open" | "suspended"
+            )
+            || state.identity.is_none()
+            || state.active_turn_id.is_some()
+            || state.provider_exit_unconfirmed
+            || !state.pending_runtime_requests.is_empty()
+            || (!state.goal_projection.is_null() && !source_goal_is_dormant(&state.goal_projection))
+            || state.pending_events.iter().any(|event| {
+                matches!(
+                    event.event_type.as_str(),
+                    "semantic_tool.input" | "runtime_request.created"
+                )
+            })
+        {
+            return Err(DurableRunnerError::invalid(
+                "source reconciliation requires dormant qualified ACPX state",
+            ));
+        }
+        if state.tool_set.schema != TOOL_SET_SCHEMA
+            || state.tool_set.schema_version != 1
+            || state.tool_set.catalog_digest
+                != authorized_tool_catalog_digest(&state.tool_set.operations)
+                    .map_err(|error| DurableRunnerError::invalid(error.to_string()))?
+        {
+            return Err(DurableRunnerError::invalid(
+                "ACPX source catalog identity is invalid",
+            ));
+        }
+        state
+            .descriptor
+            .session_config(
+                state.tool_set.clone(),
+                state.identity.clone(),
+                self.launch_profile.as_ref(),
+            )?
+            .validate()
+            .map_err(|error| DurableRunnerError::invalid(error.to_string()))?;
+        self.source_reconciliation = true;
+        Ok(())
     }
 
     fn candidate_admission(
@@ -1032,6 +1088,13 @@ impl AcpxCommandExecutor {
     }
 
     fn restore_once(&mut self) -> Result<(), DurableRunnerError> {
+        if !self.source_reconciliation {
+            self.load_state_without_session(true)?;
+        }
+        self.restore_session_if_needed()
+    }
+
+    fn load_state_without_session(&mut self, allow_rebind: bool) -> Result<(), DurableRunnerError> {
         let path = self.state_path();
         let mut file = match open_private_regular_file(&path) {
             Ok(file) => file,
@@ -1071,14 +1134,15 @@ impl AcpxCommandExecutor {
             DurableRunnerError::invalid(format!("ACPX provider state is malformed: {error}"))
         })?;
         let launch_profile_digest = self.restore_launch_profile_digest(&state)?;
-        if state.launch_profile_digest != launch_profile_digest
+        if allow_rebind
+            && state.launch_profile_digest != launch_profile_digest
             && self.rebinds_settled_session(&state)
         {
             state.launch_profile_digest = launch_profile_digest.clone();
         }
         state.validate(&self.context, &launch_profile_digest)?;
         self.state = Some(state);
-        self.restore_session_if_needed()
+        Ok(())
     }
 
     fn restore_session_if_needed(&mut self) -> Result<(), DurableRunnerError> {
@@ -1094,10 +1158,13 @@ impl AcpxCommandExecutor {
         if state.descriptor.run_id != self.context.run_id {
             return Ok(());
         }
-        if !matches!(
+        if !(matches!(
             state.lifecycle.as_str(),
             "session_open" | "turn_starting" | "turn_active" | "suspended"
-        ) {
+        ) || (self.source_reconciliation
+            && !self.restore_checked
+            && state.lifecycle == "prepared"))
+        {
             return Ok(());
         }
         let unsafe_active = matches!(state.lifecycle.as_str(), "turn_starting" | "turn_active");
@@ -1178,6 +1245,11 @@ impl AcpxCommandExecutor {
             return Err(DurableRunnerError::invalid(
                 "ACPX provider identity did not attest the qualified command digest",
             ));
+        }
+        if self.source_reconciliation && recovering {
+            session
+                .verify_dormant_session()
+                .map_err(|error| DurableRunnerError::invalid(error.to_string()))?;
         }
         Ok(session)
     }
@@ -2513,6 +2585,7 @@ impl CommandExecutor for AcpxCommandExecutor {
     }
 
     fn rotate_authority(&mut self, config: &DurableRunnerConfig) {
+        self.source_reconciliation = false;
         self.context.run_id = config.run_id.clone();
         self.context.normalized_session_id = config.normalized_session_id.clone();
         self.context.turn_id = config.turn_id.clone();

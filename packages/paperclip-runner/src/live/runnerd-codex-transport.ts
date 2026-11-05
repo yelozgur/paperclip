@@ -3680,23 +3680,25 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     const sourceRequirements = options.sourceReconciliationLaunch?.requirements;
     if (options.sourceReconciliationLaunch && (!this.#sourceReconciliationPending || !options.prepareLaunch
       || sourceRequirements?.schema !== "paperclip.runner.launch-requirements.v1"
-      || sourceRequirements.provider !== "codex" || !options.prpIdentity
+      || sourceRequirements.provider !== (options.provider ?? "codex") || !options.prpIdentity
       || commandDigest(sourceRequirements.identity) !== commandDigest(options.prpIdentity))) {
       throw new Error("native_runner_source_launch_requirements_invalid");
     }
     if (this.#sourceReconciliationPending) {
-      if ((options.provider ?? "codex") !== "codex" || !options.resumeProviderSession?.driverSessionId || !options.prpIdentity
+      if (!["codex", "acpx"].includes(options.provider ?? "codex") || !options.resumeProviderSession?.driverSessionId || !options.prpIdentity
+        || (options.provider === "acpx" && options.acpxCandidateAdmission)
         || (options.adoptExistingRunner && !options.sourceReconciliationLaunch)) {
         throw new Error("native_runner_source_reconciliation_requires_retained_source");
       }
-      if (options.sourceRecoveryVersion !== 1) {
+      const capability = options.provider === "acpx" ? "acpxSourceRecoveryVersion" : "sourceRecoveryVersion";
+      if (options[capability] !== 1) {
         if (options.runnerProcessLauncher || options.prepareLaunch || options.readRunnerState || options.runnerFilesystemRoot) {
           throw new Error("native_runner_source_recovery_unsupported");
         }
         const metadata = JSON.parse(execFileSync(options.runnerBinary ?? defaultCapabilityRunnerdBinary(), ["--build-metadata"], {
           encoding: "utf8", timeout: 5_000, maxBuffer: 65_536, stdio: ["ignore", "pipe", "ignore"],
         }));
-        if (metadata.sourceRecoveryVersion !== 1) throw new Error("native_runner_source_recovery_unsupported");
+        if (metadata[capability] !== 1) throw new Error("native_runner_source_recovery_unsupported");
       }
     }
     if (options.adoptExistingRunner && options.authorizeRunnerAdoption && !options.prepareLaunch) {

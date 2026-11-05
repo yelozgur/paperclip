@@ -339,6 +339,7 @@ impl CommandExecutor for NativeProviderCommandExecutor {
         self.select_recovery()?;
         match self.selected.as_mut() {
             Some(SelectedExecutor::LocalFacade(executor)) => executor.admit_source_reconciliation(),
+            Some(SelectedExecutor::Acpx(executor)) => executor.admit_source_reconciliation(),
             _ => Err(DurableRunnerError::invalid(
                 "source reconciliation requires retained Codex state",
             )),

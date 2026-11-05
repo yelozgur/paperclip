@@ -353,6 +353,20 @@ pub struct AcpxProviderSession {
     runtime_retired: bool,
 }
 
+pub(crate) fn source_goal_is_dormant(projection: &Value) -> bool {
+    projection["schema"] == "paperclip.session_goal.snapshot.v1"
+        && projection["workingNow"].as_bool() == Some(false)
+        && projection
+            .pointer("/goal/workingNow")
+            .and_then(Value::as_bool)
+            != Some(true)
+        && (projection.get("goal") == Some(&Value::Null)
+            || matches!(
+                projection.pointer("/goal/status").and_then(Value::as_str),
+                Some("paused" | "blocked" | "complete")
+            ))
+}
+
 impl AcpxProviderSession {
     pub fn start(config: &AcpxProviderSessionConfig) -> Result<Self, LocalRunnerError> {
         config.validate()?;
@@ -408,6 +422,41 @@ impl AcpxProviderSession {
 
     pub fn state(&self) -> &AcpxProviderState {
         &self.state
+    }
+
+    pub(crate) fn verify_dormant_session(&mut self) -> Result<(), LocalRunnerError> {
+        if self.state.active_turn_id().is_some() || self.state.has_pending_requests() {
+            return Err(LocalRunnerError::invalid(
+                "ACPX source resumed pending work",
+            ));
+        }
+        let goal = self.goal_control(GeneratedAcpxSidecarCommand::SessionGoalGet, json!({}))?;
+        if !source_goal_is_dormant(&goal) {
+            return Err(LocalRunnerError::invalid(
+                "ACPX source resumed an active or unknown goal",
+            ));
+        }
+        let snapshot = self
+            .transport
+            .request(GeneratedAcpxSidecarCommand::SessionSnapshot, json!({}))?;
+        let identity: AcpxProviderSessionIdentity =
+            serde_json::from_value(snapshot["identity"].clone()).map_err(|_| {
+                LocalRunnerError::invalid("ACPX source snapshot identity is invalid")
+            })?;
+        if identity != self.identity
+            || snapshot["runId"].as_str() != Some(self.config.run_id.as_str())
+            || snapshot.get("turnId") != Some(&Value::Null)
+            || snapshot["pendingToolCount"].as_u64() != Some(0)
+            || snapshot["pendingInputCount"].as_u64() != Some(0)
+            || !snapshot["pendingRuntimeRequests"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        {
+            return Err(LocalRunnerError::invalid(
+                "ACPX source snapshot has unexpected work or identity",
+            ));
+        }
+        Ok(())
     }
 
     /// Read the same live sidecar before exposing its in-memory pending ledger.

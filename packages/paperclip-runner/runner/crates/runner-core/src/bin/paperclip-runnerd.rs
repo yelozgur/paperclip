@@ -122,6 +122,7 @@ fn build_metadata() -> serde_json::Value {
         "packageVersion": env!("CARGO_PKG_VERSION"),
         "binaryContractVersion": 2,
         "sourceRecoveryVersion": 1,
+        "acpxSourceRecoveryVersion": 1,
         "durableSessionCapabilities": ["unlimited_runtime", "connection_lease_renewal"],
         "externalProviderCapabilities": ["openai_dot_mcp", "grok_bot_mcp", "muse_external_v1"],
         "nativeExecutionVersion": 1,
@@ -665,6 +666,7 @@ mod tests {
     fn build_metadata_advertises_the_remote_transport_contract() {
         let metadata = build_metadata();
         assert_eq!(metadata["sourceRecoveryVersion"], 1);
+        assert_eq!(metadata["acpxSourceRecoveryVersion"], 1);
         assert_eq!(metadata["schema"], RUNNERD_BUILD_METADATA_SCHEMA);
         assert_eq!(metadata["binaryContractVersion"], 2);
         assert_eq!(

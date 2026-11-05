@@ -84,6 +84,19 @@ confirms target authentication and persists its checkpoint before enabling tool
 dispatch and new turns. This protocol does not establish vendor rollout fsync
 or host-level physical process retirement by itself.
 
+ACPX requires the separate `acpxSourceRecoveryVersion: 1` capability. A Codex
+`sourceRecoveryVersion: 1` capability never enables ACPX source recovery. The
+same explicit mode checks qualified ACPX profile, session and tool-catalog
+identities before sidecar startup. Active/starting turns, active/working goals,
+pending business requests, uncertain provider exit and candidate grants fail
+closed. Settled accounting and maintenance events stay replayable under the
+source authority. Live goal and sidecar snapshot checks confirm the retained
+session and absence of sidecar-owned turns or requests. These checks follow
+session restore; they do not prove vendor restore is inert or attest all vendor
+background work. Vendor behavior needs separate live qualification. Ordinary
+ACPX authority attachment can restart its sidecar while preserving the exact
+record, backend and agent session identities.
+
 If controller-local launch preparation is absent, the trusted caller can supply
 `sourceReconciliationLaunch: { requirements }` with the frozen source inputs.
 The current execution owner prepares this launch afresh. The source launch does

@@ -10,6 +10,7 @@ import type { DurableRecoveryIdentity } from "../contracts/durable-recovery.js";
  */
 export interface RunnerExecutionDriver {
   sourceRecoveryVersion?: 1;
+  acpxSourceRecoveryVersion?: 1;
   /** Own provider configuration and file preparation in the execution environment. */
   prepareLaunch?: RunnerLaunchPreparer;
   /** Reauthorize retained resources before adoption without preparing them again.
